@@ -1,0 +1,30 @@
+{
+  "name": "page-probe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP bridge between coding agents and instrumented web pages",
+  "exports": {
+    "./vite": "./dist/vite/plugin.js",
+    "./probe": "./dist/probe/client.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/mcp/index.ts",
+    "demo": "vite --config examples/vite/vite.config.ts examples/vite",
+    "test": "npm run build && node --test test/*.test.mjs && node scripts/vite-plugin-smoke.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "ws": "^8.18.2",
+    "zod": "^3.25.67"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}

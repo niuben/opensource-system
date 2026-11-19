@@ -1,0 +1,7 @@
+- main [ref=e2]:
+  - heading "Page Probe demo" [level=1] [ref=e3]
+  - paragraph [ref=e4]:
+    - text: "Count:"
+    - strong [ref=e5]: "0"
+  - button "Increment" [ref=e6]
+  - button "Raise runtime error" [ref=e7]
