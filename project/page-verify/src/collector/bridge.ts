@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { WebSocketServer } from "ws";
 import {
@@ -6,16 +7,21 @@ import {
   removeCollectorRecord,
   writeCollectorRecord,
 } from "../shared/discovery.js";
-import { act, handleConnection, observe } from "./connection.js";
+import type { ProbeExpectation } from "../shared/protocol.js";
+import { RunExecutor } from "../run/executor.js";
+import { createRunStore, type RunTransport } from "../run/transport.js";
+import type { RunState } from "../run/state.js";
+import { handleConnection, observe } from "./connection.js";
 import { isAddressInUse } from "./guards.js";
-import { beginRun, endRun, expect } from "./run.js";
-import { notifyWaiters, type BridgeState } from "./session.js";
-import type { ConnectedPage } from "./types.js";
+import { sendCommand, type BridgeState } from "./session.js";
+import type { ConnectedPage, PagePresence } from "./types.js";
 
 export class PageBridge {
   private readonly httpServer: Server;
   private readonly server: WebSocketServer;
   private readonly state: BridgeState;
+  private readonly executor: RunExecutor;
+  private readonly store = createRunStore();
   private readonly discoveryEnabled: boolean;
   private readonly discoveryFile: string | undefined;
   private readonly host: string;
@@ -41,12 +47,49 @@ export class PageBridge {
       overflowedPages: new Set(),
       lastEventSeq: new Map(),
       completedOperations: new Map(),
-      runs: new Map(),
       waiters: new Map(),
     };
+
+    const presence: PagePresence = {
+      present: (pageId) => this.state.pages.has(pageId),
+      epochOf: (pageId) => this.state.pages.get(pageId)?.epoch,
+      markEpochChanged: (pageId) => {
+        const run = this.store.forPage(pageId);
+        if (run) run.epochChanged = true;
+      },
+      markDisconnected: (pageId) => {
+        const run = this.store.forPage(pageId);
+        if (run) run.disconnected = true;
+      },
+    };
+
+    const transport: RunTransport = {
+      send: (runId, command, opId) => {
+        const page = this.state.pages.get(this.store.get(runId)?.pageId ?? "");
+        if (!page) return Promise.reject(new Error("page_disconnected"));
+        return sendCommand(
+          this.state,
+          page,
+          runId,
+          command as Parameters<typeof sendCommand>[3],
+          opId,
+        );
+      },
+    };
+
+    this.executor = new RunExecutor({
+      store: this.store,
+      transport,
+      eventsFor: (pageId) => this.state.eventQueues.get(pageId) ?? [],
+      overflowed: (pageId) => this.state.overflowedPages.has(pageId),
+      epochOf: presence.epochOf,
+      present: presence.present,
+    });
+
     this.httpServer = createServer();
     this.server = new WebSocketServer({ server: this.httpServer });
-    this.server.on("connection", (ws, request) => handleConnection(this.state, ws, request));
+    this.server.on("connection", (ws, request) =>
+      handleConnection(this.state, presence, ws, request));
   }
 
   get port() {
@@ -149,7 +192,27 @@ export class PageBridge {
     return [...this.state.pages.values()].map(({ ws: _ws, ...summary }) => summary);
   }
 
-  act(args: {
+  async beginRun(args: {
+    pageId: string;
+    quietMs: number;
+    plannedSteps: Array<{ stepId: string; description: string }>;
+    expects: ProbeExpectation[];
+  }) {
+    const page = this.state.pages.get(args.pageId);
+    if (!page) return { ok: false, reason: "page_disconnected" };
+    const invalid = this.executor.validateBegin(args);
+    if (invalid) return { ok: false, reason: invalid };
+    return this.executor.begin({
+      runId: `run_${randomUUID()}`,
+      pageId: args.pageId,
+      epoch: page.epoch,
+      quietMs: args.quietMs,
+      plannedSteps: args.plannedSteps,
+      expects: args.expects,
+    });
+  }
+
+  async act(args: {
     pageId: string;
     runId: string;
     epoch: number;
@@ -157,24 +220,26 @@ export class PageBridge {
     stepId: string;
     action: { type: "click"; testId: string };
   }) {
-    return act(this.state, args);
+    const run = this.requireRun(args.runId, args.pageId);
+    if ("ok" in run) return run;
+    return this.executor.act(run, {
+      epoch: args.epoch,
+      opId: args.opId,
+      stepId: args.stepId,
+      action: args.action,
+    });
   }
 
-  beginRun(args: {
-    pageId: string;
-    quietMs: number;
-    plannedSteps: Array<{ stepId: string; description: string }>;
-    expects: import("../shared/protocol.js").ProbeExpectation[];
-  }) {
-    return beginRun(this.state, args);
+  async expect(args: { pageId: string; runId: string; epoch: number; expectId: string }) {
+    const run = this.requireRun(args.runId, args.pageId);
+    if ("ok" in run) return run;
+    return this.executor.expect(run, { epoch: args.epoch, expectId: args.expectId });
   }
 
-  expect(args: { pageId: string; runId: string; epoch: number; expectId: string }) {
-    return expect(this.state, args);
-  }
-
-  endRun(args: { pageId: string; runId: string }) {
-    return endRun(this.state, args);
+  async endRun(args: { pageId: string; runId: string }) {
+    const run = this.requireRun(args.runId, args.pageId);
+    if ("ok" in run) return run;
+    return this.executor.end(run);
   }
 
   async close() {
@@ -188,8 +253,9 @@ export class PageBridge {
     removeCollectorRecord(this.state.token, this.activePort, this.discoveryFile);
   }
 
-  // Kept for callers that need to wake observers after external state changes.
-  notify(pageId: string) {
-    notifyWaiters(this.state, pageId);
+  private requireRun(runId: string, pageId: string) {
+    const run = this.store.get(runId);
+    if (!run || run.pageId !== pageId) return { ok: false as const, reason: "run_not_found" };
+    return run as RunState;
   }
 }

@@ -1,8 +1,8 @@
 import type { PageMessage } from "../shared/protocol.js";
-import type { Run } from "./types.js";
+import type { RunState } from "./state.js";
 
 export function buildVerdict(input: {
-  run: Run;
+  run: RunState;
   pagePresent: boolean;
   events: Array<Extract<PageMessage, { type: "event" }>>;
   overflowed: boolean;

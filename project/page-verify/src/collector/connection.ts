@@ -1,6 +1,5 @@
 import { WebSocket, type WebSocketServer } from "ws";
 import type { PageMessage } from "../shared/protocol.js";
-import { isRecord } from "./guards.js";
 import {
   hasEventsAfter,
   isAllowedOrigin,
@@ -11,14 +10,14 @@ import {
   rejectPendingForPage,
   sendCommand,
   trimCompletedOperations,
-  validatePage,
   waitForPageEvent,
   type BridgeState,
 } from "./session.js";
-import { EVENT_LIMIT } from "./types.js";
+import { EVENT_LIMIT, type PagePresence } from "./types.js";
 
 export function handleConnection(
   state: BridgeState,
+  presence: PagePresence,
   ws: WebSocket,
   request: import("node:http").IncomingMessage,
 ) {
@@ -49,10 +48,6 @@ export function handleConnection(
         return;
       }
       connectionPageId = message.pageId;
-      const existingRun = [...state.runs.values()].find((run) => run.pageId === message.pageId);
-      if (existingRun && existingRun.epoch !== message.epoch) {
-        existingRun.epochChanged = true;
-      }
       state.pages.set(message.pageId, {
         ws,
         pageId: message.pageId,
@@ -76,9 +71,7 @@ export function handleConnection(
         page.url = message.url;
         page.title = message.title;
       }
-      for (const run of state.runs.values()) {
-        if (run.pageId === message.pageId) run.epochChanged = true;
-      }
+      presence.markEpochChanged(message.pageId);
       notifyWaiters(state, message.pageId);
       return;
     }
@@ -114,9 +107,7 @@ export function handleConnection(
     const page = state.pages.get(connectionPageId);
     if (page?.ws !== ws) return;
     state.pages.delete(connectionPageId);
-    for (const run of state.runs.values()) {
-      if (run.pageId === connectionPageId) run.disconnected = true;
-    }
+    presence.markDisconnected(connectionPageId);
     rejectPendingForPage(state, connectionPageId, new Error("page_disconnected"));
     notifyWaiters(state, connectionPageId);
   });
@@ -153,40 +144,6 @@ export async function observe(
     nextSeq: events.at(-1)?.seq ?? args.afterSeq ?? 0,
     overflowed: state.overflowedPages.has(args.pageId),
   };
-}
-
-export async function act(
-  state: BridgeState,
-  args: {
-    pageId: string;
-    runId: string;
-    epoch: number;
-    opId: string;
-    stepId: string;
-    action: { type: "click"; testId: string };
-  },
-) {
-  const run = state.runs.get(args.runId);
-  if (!run || run.pageId !== args.pageId) return { ok: false, reason: "run_not_found" };
-  if (!run.plannedSteps.some((step) => step.stepId === args.stepId)) {
-    return { ok: false, reason: "step_not_registered" };
-  }
-  const page = validatePage(state, args.pageId, args.epoch);
-  if ("ok" in page) return page;
-
-  try {
-    const result = await sendCommand(state, page, args.runId, {
-      type: "act.click",
-      testId: args.action.testId,
-    }, args.opId);
-    if (isRecord(result) && result.ok === true) run.executedSteps.add(args.stepId);
-    if (isRecord(result) && result.reason === "probe_error") run.inconclusiveReasons.add("probe_error");
-    return result;
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : "probe_error";
-    run.inconclusiveReasons.add(reason === "operation_timeout" ? "timeout" : "disconnected");
-    return { ok: false, reason: reason === "operation_timeout" ? "timeout" : "disconnected" };
-  }
 }
 
 export type { WebSocketServer };

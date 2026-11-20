@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { WebSocket, type WebSocketServer } from "ws";
-import type { PageCommand, PageMessage, PageSummary, ProbeExpectation } from "../shared/protocol.js";
-import type { ConnectedPage, PendingOperation, Run } from "./types.js";
+import type { PageCommand, PageMessage, PageSummary } from "../shared/protocol.js";
+import type { ConnectedPage, PendingOperation } from "./types.js";
 import { OP_TIMEOUT_MS } from "./types.js";
 
 export type BridgeState = {
@@ -13,7 +13,6 @@ export type BridgeState = {
   overflowedPages: Set<string>;
   lastEventSeq: Map<string, number>;
   completedOperations: Map<string, unknown>;
-  runs: Map<string, Run>;
   waiters: Map<string, Array<() => void>>;
 };
 
@@ -140,42 +139,6 @@ export function trimCompletedOperations(state: BridgeState) {
   }
 }
 
-export function startSeqOf(state: BridgeState, pageId: string) {
-  const last = state.eventQueues.get(pageId)?.at(-1);
-  return last?.type === "event" ? last.seq : 0;
-}
-
-export function registerRun(
-  state: BridgeState,
-  args: {
-    runId: string;
-    pageId: string;
-    epoch: number;
-    quietMs: number;
-    plannedSteps: Array<{ stepId: string; description: string }>;
-    expectations: Map<string, ProbeExpectation>;
-  },
-): Run {
-  const run: Run = {
-    runId: args.runId,
-    pageId: args.pageId,
-    epoch: args.epoch,
-    quietMs: args.quietMs,
-    startedAt: Date.now(),
-    plannedSteps: args.plannedSteps,
-    executedSteps: new Set(),
-    expectations: args.expectations,
-    assertions: [],
-    epochChanged: false,
-    disconnected: false,
-    inconclusiveReasons: new Set(),
-    startSeq: startSeqOf(state, args.pageId),
-  };
-  state.runs.set(run.runId, run);
-  state.overflowedPages.delete(args.pageId);
-  return run;
-}
-
 export function rejectPendingForPage(state: BridgeState, pageId: string, error: Error) {
   for (const [opId, pending] of state.pending) {
     if (pending.pageId !== pageId) continue;
@@ -183,12 +146,6 @@ export function rejectPendingForPage(state: BridgeState, pageId: string, error: 
     pending.reject(error);
     state.pending.delete(opId);
   }
-}
-
-export function markRunInconclusive(run: Run, error: unknown) {
-  const reason = error instanceof Error ? error.message : "probe_error";
-  run.inconclusiveReasons.add(reason === "operation_timeout" ? "timeout" : "disconnected");
-  return { ok: false, reason: reason === "operation_timeout" ? "timeout" : "disconnected" };
 }
 
 export type { WebSocketServer };
